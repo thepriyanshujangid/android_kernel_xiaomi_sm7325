@@ -2373,7 +2373,7 @@ static ssize_t haptic_audio_store(struct device *dev, struct device_attribute *a
 	struct aw_haptic *aw_haptic = dev_get_drvdata(dev);
 
 	uint32_t databuf[6] = { 0 };
-	struct aw_haptic_ctr *hap_ctr = NULL;
+	struct aw_haptic_ctr hap_ctr;
 
 	if (!aw_haptic->ram_init) {
 		aw_err("ram init failed, not allow to play!");
@@ -2387,19 +2387,15 @@ static ssize_t haptic_audio_store(struct device *dev, struct device_attribute *a
 				databuf[4], databuf[5]);
 		}
 
-		hap_ctr = kzalloc(sizeof(struct aw_haptic_ctr), GFP_KERNEL);
-		if (hap_ctr == NULL)
-			return count;
-
 		mutex_lock(&aw_haptic->haptic_audio.lock);
-		hap_ctr->cnt = (uint8_t)databuf[0];
-		hap_ctr->cmd = (uint8_t)databuf[1];
-		hap_ctr->play = (uint8_t)databuf[2];
-		hap_ctr->wavseq = (uint8_t)databuf[3];
-		hap_ctr->loop = (uint8_t)databuf[4];
-		hap_ctr->gain = (uint8_t)databuf[5];
-		audio_ctrl_list_ins(aw_haptic, hap_ctr);
-		if (hap_ctr->cmd == AW_CMD_STOP) {
+		hap_ctr.cnt = (uint8_t)databuf[0];
+		hap_ctr.cmd = (uint8_t)databuf[1];
+		hap_ctr.play = (uint8_t)databuf[2];
+		hap_ctr.wavseq = (uint8_t)databuf[3];
+		hap_ctr.loop = (uint8_t)databuf[4];
+		hap_ctr.gain = (uint8_t)databuf[5];
+		audio_ctrl_list_ins(aw_haptic, &hap_ctr);
+		if (hap_ctr.cmd == AW_CMD_STOP) {
 			aw_info("haptic_audio stop");
 			if (hrtimer_active(&aw_haptic->haptic_audio.timer)) {
 				aw_info("cancel haptic_audio_timer");
@@ -2420,7 +2416,6 @@ static ssize_t haptic_audio_store(struct device *dev, struct device_attribute *a
 			}
 		}
 		mutex_unlock(&aw_haptic->haptic_audio.lock);
-		kfree(hap_ctr);
 	}
 
 	return count;
