@@ -1477,7 +1477,7 @@ static int audio_ctrl_list_ins(struct aw_haptic *aw_haptic, struct aw_haptic_ctr
 	struct aw_haptic_ctr *p_new = NULL;
 	struct aw_haptic_audio *haptic_audio = &aw_haptic->haptic_audio;
 
-	p_new = kzalloc(sizeof(struct aw_haptic_ctr), GFP_KERNEL);
+	p_new = kmalloc(sizeof(struct aw_haptic_ctr), GFP_KERNEL);
 	if (p_new == NULL)
 		return -ENOMEM;
 
