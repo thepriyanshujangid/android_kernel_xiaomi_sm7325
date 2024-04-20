@@ -1012,12 +1012,10 @@ dump_rq:
 	if (md_meminfo_seq_buf)
 		md_dump_meminfo();
 
-#if defined(CONFIG_SLAB) || defined(CONFIG_SLUB_DEBUG)
+#ifdef CONFIG_SLUB_DEBUG
 	if (md_slabinfo_seq_buf)
 		md_dump_slabinfo();
-#endif
 
-#ifdef CONFIG_SLUB_DEBUG
 	if (md_slabowner_dump_addr)
 		md_dump_slabowner();
 #endif
