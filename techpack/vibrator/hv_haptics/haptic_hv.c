@@ -933,9 +933,9 @@ static int input_upload_effect(struct input_dev *dev, struct ff_effect *effect,
 {
 	struct aw_haptic *aw_haptic = input_get_drvdata(dev);
 	short wav_id = 0;
-	s16 data[3];
-	int wav_id_max = 0;
-	int ret = 0;
+	s16 custom_data[3] = { 0 };
+	u16 play_rate_us = 0;
+	int ret = 0, wav_id_max = 0;
 
 	mutex_lock(&aw_haptic->lock);
 	switch (effect->type) {
@@ -946,59 +946,66 @@ static int input_upload_effect(struct input_dev *dev, struct ff_effect *effect,
 		aw_dbg("waveform id = %d", aw_haptic->index);
 		break;
 	case FF_PERIODIC:
-		if (!aw_haptic->support_predef)
-			ret = copy_from_user(&wav_id, effect->u.periodic.custom_data, sizeof(short));
-		else {
-			ret = copy_from_user(data, effect->u.periodic.custom_data, sizeof(s16) * 3);
-			wav_id = data[0];
-		}
-
-		if (ret) {
-			aw_err("copy from user error %d!!", ret);
-			mutex_unlock(&aw_haptic->lock);
-			return -ERANGE;
-		}
-
-		aw_dbg("waveform id = %d", wav_id);
 		if (aw_haptic->support_predef) {
-			if (wav_id < 0) {
+			ret = copy_from_user(custom_data, effect->u.periodic.custom_data, sizeof(custom_data));
+			if (ret) {
+				aw_err("copy from user error %d!!", ret);
+				ret = -ERANGE;
+				goto out;
+			}
+
+			if (wav_id < 0 && wav_id >= aw_haptic->effect_max) {
 				mutex_unlock(&aw_haptic->lock);
 				return 0;
 			}
-			if (wav_id < aw_haptic->effect_max) {
+			aw_haptic->activate_mode = AW_RAM_MODE;
+			play_rate_us = aw_haptic->predefined[wav_id].play_rate_us;
+			custom_data[CUSTOM_DATA_TIMEOUT_SEC_IDX] =
+				play_rate_us / USEC_PER_SEC;
+			custom_data[CUSTOM_DATA_TIMEOUT_MSEC_IDX] =
+				(play_rate_us% USEC_PER_SEC) / USEC_PER_MSEC;
+
+			ret = copy_to_user(effect->u.periodic.custom_data, custom_data, sizeof(custom_data));
+			if (ret) {
+				ret = -EFAULT;
+				goto out;
+			}
+
+			aw_haptic->index = ++wav_id;
+			aw_haptic->gain = effect->u.periodic.magnitude * 0x80 / 0x7fff;
+			aw_haptic->func->set_gain(aw_haptic, aw_haptic->gain);
+		} else {
+			ret = copy_from_user(&wav_id, effect->u.periodic.custom_data, sizeof(short));
+			if (ret) {
+				aw_err("copy from user error %d!!", ret);
+				ret = -ERANGE;
+				goto out;
+			}
+
+			wav_id_max = aw_haptic->rtp_num + aw_haptic->ram.ram_num - 1;
+			if (wav_id > 0 && wav_id < aw_haptic->ram.ram_num) {
 				aw_haptic->activate_mode = AW_RAM_MODE;
-				data[1] = aw_haptic->predefined[wav_id].play_rate_us / 1000000;
-				data[2] = aw_haptic->predefined[wav_id].play_rate_us / 1000;
-				ret = copy_to_user(effect->u.periodic.custom_data, data, sizeof(s16) * 3);
-				if (ret) {
-					mutex_unlock(&aw_haptic->lock);
-					return -EFAULT;
-				}
-				aw_haptic->index = ++wav_id;
-				break;
+				aw_haptic->index = wav_id;
+			} else if (wav_id > aw_haptic->ram.ram_num && wav_id <= wav_id_max) {
+				aw_haptic->activate_mode = AW_RTP_MODE;
+				aw_haptic->rtp_file_num = wav_id - aw_haptic->ram.ram_num;
+			} else {
+				aw_haptic->activate_mode = AW_STANDBY_MODE;
+				aw_err("waveform id is error");
+				mutex_unlock(&aw_haptic->lock);
+				return -ERANGE;
 			}
 		}
-		wav_id_max = aw_haptic->rtp_num + aw_haptic->ram.ram_num - 1;
-		if (wav_id > 0 && wav_id < aw_haptic->ram.ram_num) {
-			aw_haptic->activate_mode = AW_RAM_MODE;
-			aw_haptic->index = wav_id;
-		} else if (wav_id > aw_haptic->ram.ram_num && wav_id <= wav_id_max) {
-			aw_haptic->activate_mode = AW_RTP_MODE;
-			aw_haptic->rtp_file_num = wav_id - aw_haptic->ram.ram_num;
-		} else {
-			aw_haptic->activate_mode = AW_STANDBY_MODE;
-			aw_err("waveform id is error");
-			mutex_unlock(&aw_haptic->lock);
-			return -ERANGE;
-		}
+		aw_dbg("waveform id = %d", wav_id);
 		break;
 	default:
 		aw_err("Unsupported effect type: %d", effect->type);
 		break;
 	}
-	mutex_unlock(&aw_haptic->lock);
 
-	return 0;
+out:
+	mutex_unlock(&aw_haptic->lock);
+	return ret;
 }
 
 static int input_playback(struct input_dev *dev, int effect_id, int val)
@@ -1050,7 +1057,7 @@ static void input_set_gain(struct input_dev *dev, uint16_t gain)
 		gain = 0x7fff;
 	aw_haptic->gain = gain * 0x80 / 0x7fff;
 	queue_work(aw_haptic->work_queue, &aw_haptic->gain_work);
-	aw_info("aw_haptic->gain = 0x%02x", aw_haptic->gain);
+	aw_dbg("aw_haptic->gain = 0x%02x", aw_haptic->gain);
 }
 
 static int input_framework_init(struct aw_haptic *aw_haptic)
@@ -1062,7 +1069,8 @@ static int input_framework_init(struct aw_haptic *aw_haptic)
 	input_dev = devm_input_allocate_device(aw_haptic->dev);
 	if (input_dev == NULL)
 		return -ENOMEM;
-	input_dev->name = "aw-haptic-hv";
+
+	input_dev->name = "awinic_haptic";
 	input_set_drvdata(input_dev, aw_haptic);
 	aw_haptic->input_dev = input_dev;
 	input_set_capability(input_dev, EV_FF, FF_GAIN);

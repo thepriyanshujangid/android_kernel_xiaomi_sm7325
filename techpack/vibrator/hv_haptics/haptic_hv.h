@@ -449,6 +449,13 @@ struct qti_hap_effect {
 	u16 play_rate_us;
 };
 
+enum custom_effect_param {
+	CUSTOM_DATA_EFFECT_IDX,
+	CUSTOM_DATA_TIMEOUT_SEC_IDX,
+	CUSTOM_DATA_TIMEOUT_MSEC_IDX,
+	CUSTOM_DATA_LEN,
+};
+
 struct trig {
 	/* AW869X */
 	uint8_t enable;
