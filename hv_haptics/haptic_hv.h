@@ -85,7 +85,6 @@
 /*#define AW_READ_BIN_FLEXBALLY*/
 /*#define AW_LRA_F0_DEFAULT*/
 #define AW_ENABLE_PIN_CONTROL
-/* #define AW_TIKTAP */
 /* #define AW_DOUBLE */
 /* #define AW_DURATION_DECIDE_WAVEFORM */
 /* #define AW_USE_MAXIMUM_F0_CALI_DATA */
@@ -101,65 +100,12 @@
  *
  *********************************************************/
 
-#ifdef AW_TIKTAP
-#define AW_TIKTAP_PROCNAME			"tiktap_buf"
-#define AW_TIKTAP_MMAP_PAGE_ORDER		(2)
-#define AW_TIKTAP_MMAP_BUF_SUM			(16)
-#define AW_TIKTAP_MMAP_BUF_SIZE			(1000)
-
-#pragma pack(4)
-struct mmap_buf_format {
-	uint8_t status;
-	uint8_t bit;
-	int16_t length;
-
-	struct mmap_buf_format *kernel_next;
-	struct mmap_buf_format *user_next;
-	uint8_t reg_addr;
-	int8_t data[AW_TIKTAP_MMAP_BUF_SIZE];
-}; /* 1024 byte */
-#pragma pack()
-
-#define TIKTAP_IOCTL_GROUP		0xFF
-#define TIKTAP_GET_F0			_IO(TIKTAP_IOCTL_GROUP, 0x01)
-#define TIKTAP_GET_HWINFO		_IO(TIKTAP_IOCTL_GROUP, 0x02)
-#define TIKTAP_SET_FREQ			_IO(TIKTAP_IOCTL_GROUP, 0x03)
-#define TIKTAP_SETTING_GAIN		_IO(TIKTAP_IOCTL_GROUP, 0x04)
-#define TIKTAP_SETTING_SPEED		_IO(TIKTAP_IOCTL_GROUP, 0x05)
-#define TIKTAP_SETTING_BSTVOL		_IO(TIKTAP_IOCTL_GROUP, 0x06)
-#define TIKTAP_ON_MODE			_IO(TIKTAP_IOCTL_GROUP, 0x07)
-#define TIKTAP_OFF_MODE			_IO(TIKTAP_IOCTL_GROUP, 0x08)
-#define TIKTAP_RTP_MODE			_IO(TIKTAP_IOCTL_GROUP, 0x09)
-#define TIKTAP_RTP_IRQ_MODE		_IO(TIKTAP_IOCTL_GROUP, 0x0A)
-#define TIKTAP_STOP_MODE		_IO(TIKTAP_IOCTL_GROUP, 0x0B)
-#define TIKTAP_STOP_RTP_MODE		_IO(TIKTAP_IOCTL_GROUP, 0x0C)
-#define TIKTAP_WRITE_REG		_IO(TIKTAP_IOCTL_GROUP, 0x0D)
-#define TIKTAP_READ_REG			_IO(TIKTAP_IOCTL_GROUP, 0x0E)
-#define TIKTAP_BST_SWITCH		_IO(TIKTAP_IOCTL_GROUP, 0x0F)
-#define TIKTAP_GET_SPEED		_IO(TIKTAP_IOCTL_GROUP, 0x10)
-
-enum {
-	MMAP_BUF_DATA_VALID = 0x55,
-	MMAP_BUF_DATA_FINISHED = 0xAA,
-	MMAP_BUF_DATA_INVALID = 0xFF,
-};
-
-#define TIkTAP_LEFT_STATUS_MASK		(0x0F)
-#define TIkTAP_LEFT_FINISHED_DONE	(MMAP_BUF_DATA_FINISHED&0xF0)
-
-#define TIKTAP_RIGHT_STATUS_MASK	(0xF0)
-#define TIKTAP_RIGHT_FINISHED_DONE	(MMAP_BUF_DATA_FINISHED&0x0F)
-
-#define TIKTAP_L_VALID_R_FINISHED	((MMAP_BUF_DATA_VALID&TIKTAP_RIGHT_STATUS_MASK)|TIKTAP_RIGHT_FINISHED_DONE)
-#define TIKTAP_R_VALID_L_FINISHED	((MMAP_BUF_DATA_VALID&TIkTAP_LEFT_STATUS_MASK)|TIkTAP_LEFT_FINISHED_DONE)
-#endif
-
 #if KERNEL_VERSION(4, 19, 1) <= LINUX_VERSION_CODE
 #define KERNEL_OVER_4_19
 #endif
 
-#if KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE
-#define KERNEL_OVER_5_10
+#if KERNEL_VERSION(6, 1, 0) <= LINUX_VERSION_CODE
+#define KERNEL_OVER_6_1
 #endif
 
 #ifdef KERNEL_OVER_4_19
@@ -212,7 +158,7 @@ struct aw_componet_codec_ops {
 #define AW869XX_DRV2_LVL_FORMULA(f0, vrms)	((((f0) < 1800) ? 1809920 : 1990912) / 1000 * (vrms) / 30500)
 #define AW869XX_BST_VOL_FORMULA(bst_vol)	(((bst_vol) - 6000) * 1000 / 78893)
 #define AW869XX_F0_FORMULA(f0_reg)		(384000 * 10 / (f0_reg))
-#define AW869XX_LRA_FORMULA(lra_code)		(((lra_code) * 678 * 1000) / (1024 * 10))
+#define AW869XX_LRA_FORMULA(lra_code, d2s_gain)	(((lra_code) * 678 * 1000) / (1024 * d2s_gain))
 #define AW869XX_VBAT_FORMULA(vbat_code)		(6100 * (vbat_code) / 1024)
 #define AW869XX_OS_FORMULA(os_code, d2s_gain)	(2440 * ((os_code) - 512) / (1024 * ((d2s_gain) + 1)))
 #define AW869XX_RAM_ADDR_H(base_addr)		((base_addr) >> 8)
@@ -618,14 +564,6 @@ struct aw_haptic {
 	ktime_t kcurrent_time;
 	ktime_t kpre_enter_time;
 	aw_snd_soc_codec_t *codec;
-#ifdef AW_TIKTAP
-	bool tiktap_ready;
-	bool vib_stop_flag;
-	bool tiktap_stop_flag;
-	struct work_struct tiktap_work;
-	struct proc_dir_entry *aw_config_proc;
-	struct mmap_buf_format *start_buf;
-#endif
 	struct device *dev;
 	struct i2c_client *i2c;
 	struct input_dev *input_dev;

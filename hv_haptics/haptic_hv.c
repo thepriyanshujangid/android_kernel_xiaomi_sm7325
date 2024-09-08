@@ -16,7 +16,7 @@
 #include "haptic_hv.h"
 #include "haptic_hv_reg.h"
 
-#define HAPTIC_HV_DRIVER_VERSION	"v1.4.0"
+#define HAPTIC_HV_DRIVER_VERSION	"v1.7.0"
 
 #ifdef AW_ENABLE_PIN_CONTROL
 static const char *pctl_names[] = {
@@ -35,9 +35,6 @@ char aw_rtp_name[][AW_RTP_NAME_MAX] = {
 	{"haptic_rtp_auto_sin.bin"},
 };
 
-#ifdef AW_TIKTAP
-static struct aw_haptic *g_aw_haptic;
-#endif
 #ifdef AW_DOUBLE
 struct aw_haptic *left;
 struct aw_haptic *right;
@@ -328,6 +325,7 @@ static int ctrl_init(struct aw_haptic *aw_haptic)
 		case AW8695_CHIPID:
 		case AW8697_CHIPID:
 			aw_haptic->func = &aw869x_func_list;
+			aw_haptic->ram_vbat_comp = AW_RAM_VBAT_COMP_ENABLE;
 			return 0;
 #endif
 #ifdef CONFIG_AW869XX_DRIVER_ENABLE
@@ -336,6 +334,7 @@ static int ctrl_init(struct aw_haptic *aw_haptic)
 		case AW86915_CHIPID:
 		case AW86917_CHIPID:
 			aw_haptic->func = &aw869xx_func_list;
+			aw_haptic->ram_vbat_comp = AW_RAM_VBAT_COMP_ENABLE;
 			return 0;
 #endif
 #ifdef CONFIG_AW8691X_DRIVER_ENABLE
@@ -344,6 +343,7 @@ static int ctrl_init(struct aw_haptic *aw_haptic)
 		case AW86717_CHIPID:
 		case AW86718_CHIPID:
 			aw_haptic->func = &aw8671x_func_list;
+			aw_haptic->ram_vbat_comp = AW_RAM_VBAT_COMP_ENABLE;
 			return 0;
 #endif
 #ifdef CONFIG_AW8692X_DRIVER_ENABLE
@@ -352,6 +352,7 @@ static int ctrl_init(struct aw_haptic *aw_haptic)
 		case AW86927_CHIPID:
 		case AW86928_CHIPID:
 			aw_haptic->func = &aw8692x_func_list;
+			aw_haptic->ram_vbat_comp = AW_RAM_VBAT_COMP_ENABLE;
 			return 0;
 #endif
 #ifdef CONFIG_AW8693X_DRIVER_ENABLE
@@ -359,6 +360,7 @@ static int ctrl_init(struct aw_haptic *aw_haptic)
 		case AW86937_CHIPID:
 		case AW86938_CHIPID:
 			aw_haptic->func = &aw8693x_func_list;
+			aw_haptic->ram_vbat_comp = AW_RAM_VBAT_COMP_DISABLE;
 			return 0;
 #endif
 		default:
@@ -541,9 +543,9 @@ static int get_ram_num(struct aw_haptic *aw_haptic)
 		return -EPERM;
 	}
 	mutex_lock(&aw_haptic->lock);
+	aw_haptic->func->play_stop(aw_haptic);
 	/* RAMINIT Enable */
 	aw_haptic->func->ram_init(aw_haptic, true);
-	aw_haptic->func->play_stop(aw_haptic);
 	aw_haptic->func->set_ram_addr(aw_haptic);
 	aw_haptic->func->get_first_wave_addr(aw_haptic, wave_addr);
 	first_wave_addr = (wave_addr[0] << 8 | wave_addr[1]);
@@ -2765,10 +2767,8 @@ static ssize_t dual_activate_store(struct device *dev, struct device_attribute *
 		return count;
 	}
 	mutex_lock(&aw_haptic->lock);
-	if (down_trylock(&left->sema) == 0)
-		up(&left->sema);
-	else
-		up(&left->sema);
+	down_trylock(&left->sema);
+	up(&left->sema);
 	left->state = val;
 	right->state = val;
 	left->dual_flag = true;
@@ -2779,7 +2779,6 @@ static ssize_t dual_activate_store(struct device *dev, struct device_attribute *
 
 	return count;
 }
-
 
 static ssize_t dual_rtp_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -2799,10 +2798,9 @@ static ssize_t dual_rtp_store(struct device *dev, struct device_attribute *attr,
 	int rtp_r = 0;
 
 	mutex_lock(&aw_haptic->lock);
-	if (down_trylock(&left->sema) == 0)
-		up(&left->sema);
-	else
-		up(&left->sema);
+	down_trylock(&left->sema);
+	up(&left->sema);
+
 	if (sscanf(buf, "%d %d", &rtp_l, &rtp_r) == 2) {
 		if (rtp_l > 0 && rtp_l < aw_haptic->rtp_num) {
 			left->state = 1;
@@ -2914,345 +2912,12 @@ static struct attribute *vibrator_attributes[] = {
 	&dev_attr_dual_activate.attr,
 	&dev_attr_dual_rtp.attr,
 #endif
-
 	NULL
 };
 
 static struct attribute_group vibrator_attribute_group = {
 	.attrs = vibrator_attributes
 };
-
-#ifdef AW_TIKTAP
-static inline unsigned int tiktap_get_sys_msecs(void)
-{
-#if (KERNEL_VERSION(5, 4, 0) <= LINUX_VERSION_CODE)
-	struct timespec64 ts64;
-
-	ktime_get_coarse_real_ts64(&ts64);
-#else
-	struct timespec64 ts64 = current_kernel_time64();
-#endif
-
-	return jiffies_to_msecs(timespec64_to_jiffies(&ts64));
-}
-
-static void tiktap_work_routine(struct work_struct *work)
-{
-	struct aw_haptic *aw_haptic = container_of(work, struct aw_haptic, tiktap_work);
-	struct mmap_buf_format *tiktap_buf = aw_haptic->start_buf;
-	int count = 100;
-#ifdef AW_DOUBLE
-	int sync_cnt = 40;
-#endif
-	unsigned char reg_val = 0x10;
-	unsigned char glb_state_val = 0;
-	unsigned int write_start;
-	unsigned int buf_cnt = 0;
-
-	mutex_lock(&aw_haptic->lock);
-	aw_haptic->tiktap_stop_flag = false;
-	aw_haptic->func->play_mode(aw_haptic, AW_RTP_MODE);
-	aw_haptic->func->upload_lra(aw_haptic, AW_F0_CALI_LRA);
-	while (true && count--) {
-		if (tiktap_buf->status == MMAP_BUF_DATA_VALID) {
-			aw_haptic->func->play_go(aw_haptic, true);
-			mdelay(1);
-			break;
-		} else if (aw_haptic->tiktap_stop_flag == true) {
-			mutex_unlock(&aw_haptic->lock);
-			return;
-		}
-		mdelay(1);
-	}
-	if (count <= 0) {
-		aw_err("wait 100 ms but start_buf->status != VALID! status = 0x%02x",
-		       tiktap_buf->status);
-		aw_haptic->tiktap_stop_flag = true;
-		mutex_unlock(&aw_haptic->lock);
-		return;
-	}
-	aw_haptic->tiktap_ready = true;
-	mutex_unlock(&aw_haptic->lock);
-
-#ifdef AW_DOUBLE /* double tiktap work sync */
-	while (sync_cnt--) {
-		if ((left->tiktap_ready == true) && (right->tiktap_ready == true)) {
-			/* aw_info("double vib is ready! start write tiktap data."); */
-			break;
-		} else if (aw_haptic->tiktap_stop_flag == true) {
-			aw_haptic->tiktap_ready = false;
-			return;
-		}
-		udelay(500);
-	}
-	if (sync_cnt <= 0) {
-		aw_err("wait 20ms but double vib not ready!");
-		aw_haptic->tiktap_stop_flag = true;
-		aw_haptic->tiktap_ready = false;
-		return;
-	}
-#endif
-
-	mutex_lock(&aw_haptic->rtp_lock);
-	pm_qos_enable(aw_haptic, true);
-	write_start = tiktap_get_sys_msecs();
-	while (true) {
-		if (tiktap_get_sys_msecs() > (write_start + 800)) {
-			aw_err("Failed! tiktap endless loop");
-			break;
-		}
-		reg_val = aw_haptic->func->rtp_get_fifo_aes(aw_haptic);
-		glb_state_val = aw_haptic->func->get_glb_state(aw_haptic);
-		if ((glb_state_val & AW_GLBRD_STATE_MASK) != AW_STATE_RTP) {
-			aw_err("tiktap glb_state != RTP_GO!, glb_state = 0x%02x", glb_state_val);
-			break;
-		}
-		if ((aw_haptic->tiktap_stop_flag == true) ||
-		    (tiktap_buf->status == MMAP_BUF_DATA_FINISHED) ||
-		    (tiktap_buf->status == MMAP_BUF_DATA_INVALID)) {
-			aw_err("tiktap exit! tiktap_buf->status = 0x%02x", tiktap_buf->status);
-			break;
-		} else if ((
-#ifdef AW_DOUBLE
-			   (aw_haptic == left && (tiktap_buf->status == TIKTAP_L_VALID_R_FINISHED)) ||
-			   (aw_haptic == right && (tiktap_buf->status == TIKTAP_R_VALID_L_FINISHED)) ||
-#endif
-			   tiktap_buf->status == MMAP_BUF_DATA_VALID) && (reg_val & 0x01)) {
-			aw_info("buf_cnt = %d, bit = %d, length = %d!",
-				buf_cnt, tiktap_buf->bit, tiktap_buf->length);
-
-			aw_haptic->func->set_rtp_data(aw_haptic, tiktap_buf->data, tiktap_buf->length);
-#ifdef AW_DOUBLE
-			if (aw_haptic == left) {
-				tiktap_buf->status &= TIkTAP_LEFT_STATUS_MASK;
-				tiktap_buf->status |= TIkTAP_LEFT_FINISHED_DONE; /* left done */
-			} else if (aw_haptic == right) {
-				tiktap_buf->status &= TIKTAP_RIGHT_STATUS_MASK;
-				tiktap_buf->status |= TIKTAP_RIGHT_FINISHED_DONE; /* right done */
-			}
-#else
-			tiktap_buf->status = MMAP_BUF_DATA_FINISHED;
-#endif
-			tiktap_buf = tiktap_buf->kernel_next;
-			write_start = tiktap_get_sys_msecs();
-			buf_cnt++;
-		} else {
-			mdelay(1);
-		}
-	}
-	pm_qos_enable(aw_haptic, false);
-	aw_haptic->tiktap_stop_flag = true;
-	mutex_unlock(&aw_haptic->rtp_lock);
-}
-
-static void tiktap_clean_buf(struct aw_haptic *aw_haptic, int status)
-{
-	struct mmap_buf_format *tiktap_buf = aw_haptic->start_buf;
-	int i = 0;
-
-	for (i = 0; i < AW_TIKTAP_MMAP_BUF_SUM; i++) {
-		tiktap_buf->status = status;
-		tiktap_buf = tiktap_buf->kernel_next;
-	}
-}
-
-static long tiktap_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
-{
-	struct aw_haptic *aw_haptic = g_aw_haptic;
-	unsigned int tmp = 0;
-
-	int ret = 0;
-
-	switch (cmd) {
-	case TIKTAP_GET_HWINFO:
-		aw_info("cmd = TIKTAP_GET_HWINFO!");
-		tmp = aw_haptic->chipid;
-		if (copy_to_user((void __user *)arg, &tmp, sizeof(unsigned int)))
-			ret = -EFAULT;
-		break;
-	case TIKTAP_GET_F0:
-		aw_info("cmd = TIKTAP_GET_F0!");
-		tmp = aw_haptic->f0;
-		if (copy_to_user((void __user *)arg, &tmp, sizeof(unsigned int)))
-			ret = -EFAULT;
-		break;
-	case TIKTAP_STOP_MODE:
-		aw_info("cmd = TIKTAP_STOP_MODE!");
-		tiktap_clean_buf(aw_haptic, MMAP_BUF_DATA_INVALID);
-#ifdef AW_DOUBLE
-		left->tiktap_stop_flag = true;
-		right->tiktap_stop_flag = true;
-		left->tiktap_ready = false;
-		right->tiktap_ready = false;
-		mutex_lock(&left->lock);
-		left->func->play_stop(left);
-		mutex_unlock(&left->lock);
-		mutex_lock(&right->lock);
-		right->func->play_stop(right);
-		mutex_unlock(&right->lock);
-#else
-		aw_haptic->tiktap_stop_flag = true;
-		mutex_lock(&aw_haptic->lock);
-		aw_haptic->func->play_stop(aw_haptic);
-		mutex_unlock(&aw_haptic->lock);
-#endif
-		break;
-	case TIKTAP_RTP_MODE:
-		/* aw_info("cmd = TIKTAP_RTP_MODE!"); */
-		tiktap_clean_buf(aw_haptic, MMAP_BUF_DATA_INVALID);
-#ifdef AW_DOUBLE
-		left->tiktap_ready = false;
-		right->tiktap_ready = false;
-		left->tiktap_stop_flag = true;
-		right->tiktap_stop_flag = true;
-
-		mutex_lock(&left->lock);
-		left->func->play_stop(left);
-		mutex_unlock(&left->lock);
-		mutex_lock(&right->lock);
-		right->func->play_stop(right);
-		mutex_unlock(&right->lock);
-
-		queue_work(aw_haptic->work_queue, &right->tiktap_work);
-		queue_work(aw_haptic->work_queue, &left->tiktap_work);
-#else
-		aw_haptic->tiktap_stop_flag = true;
-		mutex_lock(&aw_haptic->lock);
-		aw_haptic->func->play_stop(aw_haptic);
-		mutex_unlock(&aw_haptic->lock);
-		queue_work(aw_haptic->work_queue, &aw_haptic->tiktap_work);
-#endif
-		break;
-	default:
-		aw_info("unknown cmd = %d", cmd);
-		break;
-	}
-
-	return ret;
-}
-
-#ifdef CONFIG_COMPAT
-static long tiktap_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
-{
-	int ret = 0;
-
-	ret = tiktap_unlocked_ioctl(file, cmd, arg);
-
-	return ret;
-}
-#endif
-
-static int tiktap_file_mmap(struct file *filp, struct vm_area_struct *vma)
-{
-	unsigned long phys;
-	struct aw_haptic *aw_haptic = g_aw_haptic;
-	int ret = 0;
-
-#if KERNEL_VERSION(4, 7, 0) < LINUX_VERSION_CODE
-	vm_flags_t vm_flags = calc_vm_prot_bits(PROT_READ|PROT_WRITE, 0) |
-			      calc_vm_flag_bits(MAP_SHARED);
-
-	vm_flags |= current->mm->def_flags | VM_MAYREAD | VM_MAYWRITE |
-		    VM_MAYEXEC | VM_SHARED | VM_MAYSHARE;
-
-	if (vma && (pgprot_val(vma->vm_page_prot) != pgprot_val(vm_get_page_prot(vm_flags)))) {
-		aw_err("vm_page_prot error!");
-		return -EPERM;
-	}
-
-	if (vma && ((vma->vm_end - vma->vm_start) != (PAGE_SIZE << AW_TIKTAP_MMAP_PAGE_ORDER))) {
-		aw_err("mmap size check err!");
-		return -EPERM;
-	}
-#endif
-	phys = virt_to_phys(aw_haptic->start_buf);
-
-	ret = remap_pfn_range(vma, vma->vm_start, (phys >> PAGE_SHIFT),
-			      (vma->vm_end - vma->vm_start), vma->vm_page_prot);
-	if (ret) {
-		aw_err("mmap failed!");
-		return ret;
-	}
-
-	aw_info("success!");
-
-	return ret;
-}
-
-#ifdef KERNEL_OVER_5_10
-static const struct proc_ops tiktap_proc_ops = {
-	.proc_mmap = tiktap_file_mmap,
-	.proc_ioctl = tiktap_unlocked_ioctl,
-#ifdef CONFIG_COMPAT
-	.proc_compat_ioctl = tiktap_compat_ioctl,
-#endif
-};
-#else
-static const struct file_operations tiktap_proc_ops = {
-	.owner = THIS_MODULE,
-	.mmap = tiktap_file_mmap,
-	.unlocked_ioctl = tiktap_unlocked_ioctl,
-#ifdef CONFIG_COMPAT
-	.compat_ioctl = tiktap_compat_ioctl,
-#endif
-};
-#endif
-
-static int tiktap_init(struct aw_haptic *aw_haptic)
-{
-	/* contrl double vib init once */
-	static int tiktap_init;
-	static struct mmap_buf_format *tiktap_start_buf;
-	static struct proc_dir_entry *tiktap_config_proc;
-
-	if (tiktap_init == 0) {
-		/* Create proc file node */
-		tiktap_config_proc = NULL;
-		tiktap_config_proc = proc_create(AW_TIKTAP_PROCNAME, 0664, NULL, &tiktap_proc_ops);
-		if (tiktap_config_proc == NULL) {
-			aw_err("create proc entry %s failed", AW_TIKTAP_PROCNAME);
-			return -EPERM;
-		}
-		aw_info("create proc entry %s success", AW_TIKTAP_PROCNAME);
-
-		/* Construct shared memory */
-		tiktap_start_buf = (struct mmap_buf_format *)__get_free_pages(GFP_KERNEL, AW_TIKTAP_MMAP_PAGE_ORDER);
-		if (tiktap_start_buf == NULL) {
-			aw_err("Error __get_free_pages failed");
-			return -ENOMEM;
-		}
-		SetPageReserved(virt_to_page(tiktap_start_buf));
-		{
-			struct mmap_buf_format *temp;
-			unsigned int i = 0;
-
-			temp = tiktap_start_buf;
-			for (i = 1; i < AW_TIKTAP_MMAP_BUF_SUM; i++) {
-				temp->kernel_next = (tiktap_start_buf + i);
-				temp = temp->kernel_next;
-			}
-			temp->kernel_next = tiktap_start_buf;
-
-			temp = tiktap_start_buf;
-			for (i = 0; i < AW_TIKTAP_MMAP_BUF_SUM; i++) {
-				temp->bit = i;
-				temp = temp->kernel_next;
-			}
-		}
-
-	}
-	tiktap_init = 1;
-
-	aw_haptic->aw_config_proc = tiktap_config_proc;
-	aw_haptic->start_buf = tiktap_start_buf;
-	/* init flag and work */
-	aw_haptic->tiktap_stop_flag = true;
-	aw_haptic->tiktap_ready = false;
-	INIT_WORK(&aw_haptic->tiktap_work, tiktap_work_routine);
-
-	return 0;
-}
-#endif
 
 static int vibrator_init(struct aw_haptic *aw_haptic)
 {
@@ -3299,7 +2964,7 @@ static void haptic_init(struct aw_haptic *aw_haptic)
 	aw_haptic->func->set_bst_peak_cur(aw_haptic);
 	aw_haptic->func->set_bst_vol(aw_haptic, aw_haptic->vmax);
 	aw_haptic->func->auto_bst_enable(aw_haptic, aw_haptic->info.is_enabled_auto_bst);
-	aw_haptic->ram_vbat_comp = AW_RAM_VBAT_COMP_ENABLE;
+	aw_haptic->func->vbat_mode_config(aw_haptic, AW_CONT_VBAT_HW_COMP_MODE);
 	/* f0 calibration */
 	f0_cali(aw_haptic);
 	mutex_unlock(&aw_haptic->lock);
@@ -3427,15 +3092,6 @@ static int aw_i2c_probe(struct i2c_client *i2c, const struct i2c_device_id *id)
 		goto err_irq_config;
 	}
 
-#ifdef AW_TIKTAP
-	g_aw_haptic = aw_haptic;
-	ret = tiktap_init(aw_haptic);
-	if (ret) {
-		aw_err("tiktap_init failed ret = %d", ret);
-		goto err_irq_config;
-	}
-#endif
-
 	vibrator_init(aw_haptic);
 	haptic_init(aw_haptic);
 	aw_haptic->work_queue = create_singlethread_workqueue("aw_haptic_vibrator_work_queue");
@@ -3468,7 +3124,11 @@ err_reset_gpio_request:
 	return ret;
 }
 
+#ifdef KERNEL_OVER_6_1
+static void aw_remove(struct i2c_client *i2c)
+#else
 static int aw_remove(struct i2c_client *i2c)
+#endif
 {
 	struct aw_haptic *aw_haptic = i2c_get_clientdata(i2c);
 
@@ -3494,12 +3154,6 @@ static int aw_remove(struct i2c_client *i2c)
 	snd_soc_unregister_codec(&i2c->dev);
 #endif
 #endif
-#ifdef AW_TIKTAP
-	proc_remove(aw_haptic->aw_config_proc);
-	aw_haptic->aw_config_proc = NULL;
-	free_pages((unsigned long)aw_haptic->start_buf, AW_TIKTAP_MMAP_PAGE_ORDER);
-	aw_haptic->start_buf = NULL;
-#endif
 #ifndef AW_ENABLE_PIN_CONTROL
 	if (gpio_is_valid(aw_haptic->irq_gpio))
 		devm_gpio_free(&i2c->dev, aw_haptic->irq_gpio);
@@ -3507,7 +3161,9 @@ static int aw_remove(struct i2c_client *i2c)
 		devm_gpio_free(&i2c->dev, aw_haptic->reset_gpio);
 #endif
 
+#ifndef KERNEL_OVER_6_1
 	return 0;
+#endif
 }
 
 static int aw_i2c_suspend(struct device *dev)
