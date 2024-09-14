@@ -241,7 +241,7 @@
 		aw8692x_brk_bst_md = /bits/ 8 <0>;
 		aw8692x_cont_tset = /bits/ 8 < 0x06 >;
 		aw8692x_cont_bemf_set = /bits/ 8 < 0x02 >;
-		aw86927_vib_cont_bst_brk_gain = /bits/ 8 <0x05>;
+		aw8692x_cont_bst_brk_gain = /bits/ 8 <0x05>;
 		aw8692x_cont_brk_gain = /bits/ 8 <0x08>;
 		aw8692x_cont_brk_time = /bits/ 8 <0x08>;
 		aw8692x_duration_time = /bits/ 8 <20 30 60>;
